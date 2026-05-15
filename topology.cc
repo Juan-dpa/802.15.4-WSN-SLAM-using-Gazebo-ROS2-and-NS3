@@ -14,6 +14,7 @@
 // FROM NS3
 
 #include "ns3/core-module.h"
+#include "ns3/lr-wpan-module.h"
 
 // FROM C++
 
