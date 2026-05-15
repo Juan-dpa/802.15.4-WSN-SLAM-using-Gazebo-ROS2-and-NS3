@@ -3,6 +3,8 @@
 #include "ns3/log.h"
 #include <iostream>
 
+NS_LOG_COMPONENT_DEFINE("SlamDataCollector");
+
 // Constructor
 SlamDataCollector::SlamDataCollector(std::string csvFilename) 
     : m_rxPackets(0), m_txFailures(0) 
@@ -43,6 +45,11 @@ void SlamDataCollector::OnDataIndication(McpsDataIndicationParams params, Ptr<Pa
     int8_t rssi = params.m_rssi;
     Mac16Address srcAddr = params.m_srcAddr;
 
+    // Escribir en el archivo CSV
     m_csvFile << rxTime << "," << srcAddr << "," << seqNum << "," << static_cast<int>(rssi) << "\n";
     m_rxPackets++;
+
+    // Imprimir por consola para depuración
+    NS_LOG_INFO("[RX_INDICATION] Time: " << rxTime << "s | Src MAC: " << srcAddr 
+                << " | SeqNum: " << seqNum << " | RSSI: " << static_cast<int>(rssi) << " dBm");
 }

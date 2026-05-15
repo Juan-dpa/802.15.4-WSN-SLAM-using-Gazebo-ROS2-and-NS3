@@ -29,7 +29,6 @@
 #include <fstream>
 #include <iostream>
 
-#include "entities.h"
 #include "SlamDataCollector.h"
 
 // DEFINES
@@ -39,6 +38,7 @@
 #define NUMBER_EDS 8
 #define NUMBER_ROBOTS 1
 #define BROADCAST_ADDR "ff:ff"
+#define SIMULATION_TIME_BUFFER 1
 
 using namespace ns3;
 using namespace ns3::lrwpan;
@@ -50,16 +50,16 @@ main(int argc, char* argv[])
 {
 
     Time::SetResolution(Time::PS);
-    std::string trajectoryFilename = "trajectory.csv";
-    std::string nodePositions = "positions.csv";
+    std::string trajectoryFilename = "scratch/Proyecto_ROS2_WSN/trajectory.csv";
+    std::string nodePositions = "scratch/Proyecto_ROS2_WSN/positions.csv";
     bool pcapTracing = false;
-    bool verificationMode = false;
+    //bool verificationMode = false;
 
     CommandLine parameters;
     parameters.AddValue("pcap", "Flag for generating pcap of traffic",pcapTracing);
     parameters.AddValue("trajectoryFilename","Filename of Mobility Data",trajectoryFilename);
     parameters.AddValue("nodePositions","Filename of Mobility Data",nodePositions);
-    parameters.AddValue("verif", "Flag for running the simulation in verification mode" , verificationMode);
+    //parameters.AddValue("verif", "Flag for running the simulation in verification mode" , verificationMode);
     parameters.Parse(argc,argv);
 
     // Helper Configuration
@@ -69,6 +69,10 @@ main(int argc, char* argv[])
     NodeContainer nodes;
     nodes.Create(NUMBER_COORDINATORS+NUMBER_EDS+NUMBER_ROBOTS); 
     NetDeviceContainer devices = lrWpanHelper.Install(nodes);
+
+    if(pcapTracing==true){
+        lrWpanHelper.EnablePcap("scratch/Proyecto_ROS2_WSN/pcap", devices.Get(devices.GetN()-1), true);
+    }
 
     // After Installing
     // =========================================================================
@@ -89,7 +93,7 @@ main(int argc, char* argv[])
     }
 
     // Last instant of movement should be SimulationTime
-    double tSim;
+    double lastTrajectoryTime = 0;
 
     std::string line;
     while (std::getline(trajectoryFile, line)) {
@@ -109,7 +113,7 @@ main(int argc, char* argv[])
         if (std::getline(ss, item, ',')) z = std::stod(item);
 
         robotMobilityModel->AddWaypoint(Waypoint(Seconds(t), Vector(x, y, z)));
-        tSim = t;
+        lastTrajectoryTime = t;
 
     }
     trajectoryFile.close();
@@ -177,7 +181,7 @@ main(int argc, char* argv[])
     // =========================================================================   
     // 1. Create the instance of our collector class.
     // This will open the CSV file and write the headers immediately.
-    SlamDataCollector collector("slam_dataset_run1.csv");
+    SlamDataCollector collector("scratch/Proyecto_ROS2_WSN/slam_dataset_run1.csv");
 
     uint32_t totalDevices = devices.GetN();
 
@@ -210,7 +214,7 @@ main(int argc, char* argv[])
     params.m_dstAddrMode = SHORT_ADDR;
     params.m_dstPanId = PAN_ID;
     params.m_dstAddr = Mac16Address(BROADCAST_ADDR); // IEEE 802.15.4 Broadcast Address
-    params.m_msduHandle = 0;                  // Will be dynamically updated
+    params.m_msduHandle = 0;                  // Will be dynamically updated 
     params.m_txOptions = TX_OPTION_NONE;      // No ACK required for Broadcast
 
     double txInterval = 0.5; // Each static node transmits twice per second (every 500 ms)
@@ -255,14 +259,16 @@ main(int argc, char* argv[])
                                 macLayer, 
                                 params, 
                                 p);
+                               
 
             seqNum++; // Increment for the next transmission
         }
     }
 
+    Simulator::Stop(Seconds(lastTrajectoryTime+SIMULATION_TIME_BUFFER));
+    Simulator::Run();
 
-
-
-    
+    Simulator::Destroy();
+    return 0;
 
 }

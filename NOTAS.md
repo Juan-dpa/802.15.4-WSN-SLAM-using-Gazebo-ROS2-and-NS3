@@ -37,3 +37,8 @@ PLME-SET (Request, Confirm)
 PLME-GET (Request, Confirm)
 ```
 
+Modo depuración, para lanzar:
+
+```bash
+NS_LOG="SlamDataCollector=level_all|prefix_all" ./ns3 run "topology --pcap=true"
+```
