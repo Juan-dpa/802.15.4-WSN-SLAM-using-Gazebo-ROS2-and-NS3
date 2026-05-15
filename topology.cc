@@ -71,8 +71,15 @@ main(int argc, char* argv[])
     NetDeviceContainer devices = lrWpanHelper.Install(nodes);
 
     if(pcapTracing==true){
+        // Enable PCAP for Robot
         lrWpanHelper.EnablePcap("scratch/Proyecto_ROS2_WSN/pcap", devices.Get(devices.GetN()-1), true);
     }
+
+    // Set Robot in Sniffer Moder
+    Ptr<LrWpanMac> robotMac = devices.Get(devices.GetN() - 1)->GetObject<LrWpanNetDevice>()->GetMac();
+    robotMac->m_macPromiscuousMode = true;
+    
+    
 
     // After Installing
     // =========================================================================
@@ -213,7 +220,7 @@ main(int argc, char* argv[])
     params.m_srcAddrMode = SHORT_ADDR;
     params.m_dstAddrMode = SHORT_ADDR;
     params.m_dstPanId = PAN_ID;
-    params.m_dstAddr = Mac16Address(BROADCAST_ADDR); // IEEE 802.15.4 Broadcast Address
+    params.m_dstAddr = Mac16Address(devices.Get(0)->GetObject<LrWpanNetDevice>()->GetMac()->GetShortAddress()); // Coordinator MAC address
     params.m_msduHandle = 0;                  // Will be dynamically updated 
     params.m_txOptions = TX_OPTION_NONE;      // No ACK required for Broadcast
 

@@ -44,12 +44,14 @@ void SlamDataCollector::OnDataIndication(McpsDataIndicationParams params, Ptr<Pa
     double rxTime = Simulator::Now().GetSeconds();
     int8_t rssi = params.m_rssi;
     Mac16Address srcAddr = params.m_srcAddr;
+    Mac16Address dstAddr = params.m_dstAddr;
 
     // Escribir en el archivo CSV
     m_csvFile << rxTime << "," << srcAddr << "," << seqNum << "," << static_cast<int>(rssi) << "\n";
     m_rxPackets++;
 
-    // Imprimir por consola para depuración
-    NS_LOG_INFO("[RX_INDICATION] Time: " << rxTime << "s | Src MAC: " << srcAddr 
+    // Debug the Dst Addr to check if this is a proper star topology setup
+    
+    NS_LOG_INFO("[RX_INDICATION] Time: " << rxTime << "s | Src MAC: " << srcAddr << " | Dst MAC: " << dstAddr  
                 << " | SeqNum: " << seqNum << " | RSSI: " << static_cast<int>(rssi) << " dBm");
 }
