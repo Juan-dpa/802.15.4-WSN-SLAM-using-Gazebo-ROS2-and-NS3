@@ -30,6 +30,7 @@
 #include <iostream>
 
 #include "entities.h"
+#include "SlamDataCollector.h"
 
 // DEFINES
 
@@ -37,6 +38,7 @@
 #define NUMBER_COORDINATORS 1
 #define NUMBER_EDS 8
 #define NUMBER_ROBOTS 1
+#define BROADCAST_ADDR "ff:ff"
 
 using namespace ns3;
 using namespace ns3::lrwpan;
@@ -86,6 +88,9 @@ main(int argc, char* argv[])
         NS_FATAL_ERROR("Error opening: " << trajectoryFilename);
     }
 
+    // Last instant of movement should be SimulationTime
+    double tSim;
+
     std::string line;
     while (std::getline(trajectoryFile, line)) {
         // Ignoring comments or empty lines
@@ -104,6 +109,8 @@ main(int argc, char* argv[])
         if (std::getline(ss, item, ',')) z = std::stod(item);
 
         robotMobilityModel->AddWaypoint(Waypoint(Seconds(t), Vector(x, y, z)));
+        tSim = t;
+
     }
     trajectoryFile.close();
 
@@ -164,6 +171,95 @@ main(int argc, char* argv[])
         NS_FATAL_ERROR("Error: The CSV file contains fewer positions (" << nodeIndex 
                        << ") than the required static nodes (" << totalNodes - 1 << ").");
     }
+
+    // =========================================================================
+    // 5. Instantiate the Data Collector and Connect MAC SAP Callbacks
+    // =========================================================================   
+    // 1. Create the instance of our collector class.
+    // This will open the CSV file and write the headers immediately.
+    SlamDataCollector collector("slam_dataset_run1.csv");
+
+    uint32_t totalDevices = devices.GetN();
+
+    // 2. Iterate through all devices in the PAN to connect their MAC callbacks
+    for (uint32_t i = 0; i < totalDevices; i++) {
+        // Retrieve the MAC layer for the current device
+        Ptr<LrWpanMac> macLayer = devices.Get(i)->GetObject<LrWpanNetDevice>()->GetMac();
+
+        if (i < totalDevices - 1) {
+            // Static Nodes (Coordinator + End Devices): Index 0 to N-2
+            // They are transmitters. We connect the Confirm callback to monitor Tx status.
+            macLayer->SetMcpsDataConfirmCallback(
+                MakeCallback(&SlamDataCollector::OnDataConfirm, &collector)
+            );
+        } else {
+            // Mobile Robot: Index N-1 (The last device in the container)
+            // It is a passive listener. We connect the Indication callback to capture RSSI.
+            macLayer->SetMcpsDataIndicationCallback(
+                MakeCallback(&SlamDataCollector::OnDataIndication, &collector)
+            );
+        }
+    }
+
+    // =========================================================================
+    // 6. Schedule Data Transmissions (McpsDataRequest)
+    // =========================================================================
+    // Setup the common parameters for a broadcast transmission
+    McpsDataRequestParams params;
+    params.m_srcAddrMode = SHORT_ADDR;
+    params.m_dstAddrMode = SHORT_ADDR;
+    params.m_dstPanId = PAN_ID;
+    params.m_dstAddr = Mac16Address(BROADCAST_ADDR); // IEEE 802.15.4 Broadcast Address
+    params.m_msduHandle = 0;                  // Will be dynamically updated
+    params.m_txOptions = TX_OPTION_NONE;      // No ACK required for Broadcast
+
+    double txInterval = 0.5; // Each static node transmits twice per second (every 500 ms)
+    uint32_t numTransmitters = totalNodes - 1; // 9 nodes (Index 0 to 8)
+
+    // Iterate through all static transmitters
+    for (uint32_t i = 0; i < numTransmitters; i++) {
+        
+        // Retrieve the MAC layer pointer for the current transmitter
+        Ptr<LrWpanMac> macLayer = devices.Get(i)->GetObject<LrWpanNetDevice>()->GetMac();
+
+        // Stagger transmissions by 50ms per node to prevent CSMA/CA collisions
+        // e.g., Node 0 at 0ms, Node 1 at 50ms, Node 2 at 100ms...
+        Time staggerOffset = MilliSeconds(i * 50);
+
+        uint32_t seqNum = 0; // Unique sequence ID for this specific node
+
+        // Schedule transmissions from t=0.0 up to the end of the robot's trajectory
+        for (double t = 0.0; t <= lastTrajectoryTime; t += txInterval) {
+            
+            // 1. Encode the sequence number into a 4-byte buffer (Big Endian format)
+            // This is the "ID" we will decode in the DataIndication callback
+            uint8_t buffer[4];
+            buffer[0] = (seqNum >> 24) & 0xFF;
+            buffer[1] = (seqNum >> 16) & 0xFF;
+            buffer[2] = (seqNum >> 8) & 0xFF;
+            buffer[3] = seqNum & 0xFF;
+
+            // 2. Create the packet containing our encoded payload
+            Ptr<Packet> p = Create<Packet>(buffer, 4);
+
+            // 3. Update the handle (Useful if debugging MAC traces)
+            // It must be an 8-bit integer, so we wrap it using modulo 255
+            params.m_msduHandle = seqNum % 255; 
+
+            // 4. Calculate the exact absolute time this packet should be fired
+            Time txTime = Seconds(t) + staggerOffset;
+
+            // 5. Inject the event into the NS-3 Scheduler
+            Simulator::Schedule(txTime, 
+                                &LrWpanMac::McpsDataRequest, 
+                                macLayer, 
+                                params, 
+                                p);
+
+            seqNum++; // Increment for the next transmission
+        }
+    }
+
 
 
 
