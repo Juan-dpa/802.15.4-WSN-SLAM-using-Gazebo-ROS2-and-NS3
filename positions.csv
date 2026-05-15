@@ -1,0 +1,13 @@
+# Archivo de posiciones estaticas (X, Y, Z) en metros.
+# El primer nodo (Linea 1 de datos) es el PAN Coordinator.
+# Los siguientes 8 nodos son los End Devices (Balizas).
+# Altura Z fijada a 2.5m (montaje en pared/techo).
+10.0, 10.0, 2.5
+0.0, 0.0, 2.5
+20.0, 0.0, 2.5
+20.0, 20.0, 2.5
+0.0, 20.0, 2.5
+10.0, 0.0, 2.5
+20.0, 10.0, 2.5
+10.0, 20.0, 2.5
+0.0, 10.0, 2.5
