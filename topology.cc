@@ -65,7 +65,24 @@ main(int argc, char* argv[])
     // Helper Configuration
     LrWpanHelper lrWpanHelper;
     lrWpanHelper.SetPropagationDelayModel("ns3::ConstantSpeedPropagationDelayModel");
-    lrWpanHelper.AddPropagationLossModel("ns3::LogDistancePropagationLossModel"); // NakagamiPropagationLossModel could be implemented in the future
+    lrWpanHelper.AddPropagationLossModel("ns3::LogDistancePropagationLossModel"); 
+
+    //NakagamiPropagationLossModel Implementation
+    // Adapt the cutoff distances for an Indoor topology (in meters)
+    // m0: LOS (Very short distances)
+    // m1: NLOS (Transitions to Rayleigh fading after Distance1)
+    // m2: NLOS (Remains in Rayleigh fading after Distance2)
+    // TODO: Investigate references for the parameters. Distance depends heavily on the actual topology defined in nodePositions(csv)
+    // That must be correlated in code.
+    lrWpanHelper.AddPropagationLossModel(
+        "ns3::NakagamiPropagationLossModel",
+        "m0", DoubleValue(1.5), 
+        "m1", DoubleValue(1.0), 
+        "m2", DoubleValue(1.0), 
+        "Distance1", DoubleValue(5.0), 
+        "Distance2", DoubleValue(15.0) 
+    );
+
     NodeContainer nodes;
     nodes.Create(NUMBER_COORDINATORS+NUMBER_EDS+NUMBER_ROBOTS); 
     NetDeviceContainer devices = lrWpanHelper.Install(nodes);
@@ -79,8 +96,6 @@ main(int argc, char* argv[])
     Ptr<LrWpanMac> robotMac = devices.Get(devices.GetN() - 1)->GetObject<LrWpanNetDevice>()->GetMac();
     robotMac->m_macPromiscuousMode = true;
     
-    
-
     // After Installing
     // =========================================================================
     // 1. PAN Creation
@@ -99,7 +114,7 @@ main(int argc, char* argv[])
         NS_FATAL_ERROR("Error opening: " << trajectoryFilename);
     }
 
-    // Last instant of movement should be SimulationTime
+    // Last instant of movement should cover most of SimulationTime
     double lastTrajectoryTime = 0;
 
     std::string line;
@@ -125,7 +140,7 @@ main(int argc, char* argv[])
     }
     trajectoryFile.close();
 
-    // Finally, we add the mobility model directly to the node
+    // Finally, we add the mobility model directly to the Robot
     // IMPORTANT: While reading the way the physical layer sets its MobilityModel,
     // it's shown that you can either set it from that layer or, as last resort,
     // its DoInitialize method (executes at Simulator::Run) will get it from the node itself.
@@ -184,7 +199,7 @@ main(int argc, char* argv[])
     }
 
     // =========================================================================
-    // 5. Instantiate the Data Collector and Connect MAC SAP Callbacks
+    // 4. Instantiate the Data Collector and Connect MAC SAP Callbacks
     // =========================================================================   
     // 1. Create the instance of our collector class.
     // This will open the CSV file and write the headers immediately.
@@ -213,7 +228,7 @@ main(int argc, char* argv[])
     }
 
     // =========================================================================
-    // 6. Schedule Data Transmissions (McpsDataRequest)
+    // 5. Schedule Data Transmissions (McpsDataRequest)
     // =========================================================================
     // Setup the common parameters for a broadcast transmission
     McpsDataRequestParams params;
