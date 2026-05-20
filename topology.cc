@@ -20,6 +20,7 @@
 #include "ns3/propagation-loss-model.h"
 #include "ns3/simulator.h"
 #include "ns3/single-model-spectrum-channel.h"
+#include "ns3/buildings-module.h"
 #include "ns3/waypoint-mobility-model.h"
 #include "ns3/waypoint.h"
 
@@ -146,6 +147,7 @@ main(int argc, char* argv[])
     // its DoInitialize method (executes at Simulator::Run) will get it from the node itself.
     // Some parts of the simulator probably depend on the same fallback.
     // So it's a better method to set it with node->AggregateObject(mobility)
+    // instead of using the helper.
     robot->AggregateObject(robotMobilityModel);
 
     // =========================================================================
