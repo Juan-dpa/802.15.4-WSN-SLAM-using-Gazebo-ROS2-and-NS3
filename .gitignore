@@ -1,0 +1,24 @@
+# Zone.Identifier (NTFS alternate data streams visibles en WSL)
+*:Zone.Identifier
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# QEMU
+*.iso
+*.qcow2
+
+# Editor
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
