@@ -41,6 +41,7 @@
 #define NUMBER_ROBOTS 1
 #define BROADCAST_ADDR "ff:ff"
 #define SIMULATION_TIME_BUFFER 1
+#define TX_INTERVAL 0.5
 
 using namespace ns3;
 using namespace ns3::lrwpan;
@@ -97,9 +98,7 @@ main(int argc, char* argv[])
     // =========================================================================
     Ptr<Node> robot = nodes.Get(nodes.GetN() - 1);
     Ptr<WaypointMobilityModel> robotMobilityModel = CreateObject<WaypointMobilityModel>();
-
     double lastTrajectoryTime = CsvScenarioHelper::LoadTrajectory(trajectoryFilename,robotMobilityModel, robot);
-    uint32_t totalNodes = nodes.GetN();
     
     // =========================================================================
     // 3. MobilityModel for both the Coordinator and EndDevices (Static)
@@ -119,7 +118,6 @@ main(int argc, char* argv[])
     // 1. Create the instance of our collector class.
     // This will open the CSV file and write the headers immediately.
     SlamDataCollector collector(outputFile);
-
     uint32_t totalDevices = devices.GetN();
 
     // 2. Iterate through all devices in the PAN to connect their MAC callbacks
@@ -154,51 +152,97 @@ main(int argc, char* argv[])
     params.m_msduHandle = 0;                  // Will be dynamically updated 
     params.m_txOptions = TX_OPTION_NONE;      // No ACK required for Broadcast
 
-    double txInterval = 0.5; // Each static node transmits twice per second (every 500 ms)
-    uint32_t numTransmitters = totalNodes - 1; // 9 nodes (Index 0 to 8)
+    // ==============================================================================
+    // STOCHASTIC MODELS INITIALIZATION (Parametrized for real IoT Hardware)
+    // Instantiated outside the loop to prevent memory leaks and optimize execution
+    // ==============================================================================
+
+    // 1. Clock Drift / Skew (Hardware derivation specific to the node)
+    // Distribution: Normal, Mean = 0, StdDev = 10 ppm (Variance = 1e-10)
+    Ptr<NormalRandomVariable> clockSkewVar = CreateObject<NormalRandomVariable>();
+    clockSkewVar->SetAttribute("Mean", DoubleValue(0.0));
+    clockSkewVar->SetAttribute("Variance", DoubleValue(1e-10)); 
+
+    // 2. Initial Phase Offset (Boot Jitter)
+    // Distribution: Uniform, 0 to 5 ms. 
+    // Simulates the static delay when the RTOS initializes the TDMA timer at boot.
+    Ptr<UniformRandomVariable> phaseOffsetVar = CreateObject<UniformRandomVariable>();
+    phaseOffsetVar->SetAttribute("Min", DoubleValue(0.0));
+    phaseOffsetVar->SetAttribute("Max", DoubleValue(0.005));
+
+    // 3. OS/MAC Task Scheduling Jitter (Per-packet latency)
+    // Distribution: Uniform, 0 to 2 ms.
+    // Simulates context-switching and interrupt latency before Tx.
+    Ptr<UniformRandomVariable> osJitterVar = CreateObject<UniformRandomVariable>();
+    osJitterVar->SetAttribute("Min", DoubleValue(0.0));
+    osJitterVar->SetAttribute("Max", DoubleValue(0.002));
+
+    // ==============================================================================
+    // TRANSMISSION SCHEDULING LOOP
+    // ==============================================================================
 
     // Iterate through all static transmitters
-    for (uint32_t i = 0; i < numTransmitters; i++) {
+    for (uint32_t i = 0; i < NUMBER_EDS; i++) {
         
         // Retrieve the MAC layer pointer for the current transmitter
         Ptr<LrWpanMac> macLayer = devices.Get(i)->GetObject<LrWpanNetDevice>()->GetMac();
 
-        // Stagger transmissions by 50ms per node to prevent CSMA/CA collisions
-        // e.g., Node 0 at 0ms, Node 1 at 50ms, Node 2 at 100ms...
-        Time staggerOffset = MilliSeconds(i * 50);
+        // Engineer's Perfect TDMA Stagger (e.g., Node 0 at 0ms, Node 1 at 50ms...)
+        double baseStagger = i * 0.050; // Represented directly in seconds
+
+        // -- PER-NODE STOCHASTICS (Calculated once for the entire life of this node) --
+        
+        // a) Get the unique crystal defect for this node
+        double alpha_i = clockSkewVar->GetValue();
+        // Truncate to realistic commercial limits (+/- 30 ppm) to avoid statistical outliers
+        if (alpha_i > 30e-6) alpha_i = 30e-6;
+        if (alpha_i < -30e-6) alpha_i = -30e-6;
+
+        // b) Get the static initialization delay for this node's timer
+        double phi_i = phaseOffsetVar->GetValue();
 
         uint32_t seqNum = 0; // Unique sequence ID for this specific node
+        double t_nominal = 0.0; // The theoretical time in a perfect world
 
         // Schedule transmissions from t=0.0 up to the end of the robot's trajectory
-        for (double t = 0.0; t <= lastTrajectoryTime; t += txInterval) {
+        while (t_nominal <= lastTrajectoryTime) {
             
-            // 1. Encode the sequence number into a 4-byte buffer (Big Endian format)
-            // This is the "ID" we will decode in the DataIndication callback
-            uint8_t buffer[4];
-            buffer[0] = (seqNum >> 24) & 0xFF;
-            buffer[1] = (seqNum >> 16) & 0xFF;
-            buffer[2] = (seqNum >> 8) & 0xFF;
-            buffer[3] = seqNum & 0xFF;
+            // -- PER-PACKET STOCHASTIC --
+            // c) Get the dynamic OS delay for this specific packet
+            double jitter_k = osJitterVar->GetValue();
 
-            // 2. Create the packet containing our encoded payload
-            Ptr<Packet> p = Create<Packet>(buffer, 4);
+            // ----------------------------------------------------------------------
+            // Absolute Real Time = (Absolute Nominal Time * Hardware Skew) + Phase Offset + OS Jitter
+            // ----------------------------------------------------------------------
+            double absoluteNominalTime = t_nominal + baseStagger;
+            double txTimeReal = (absoluteNominalTime * (1.0 + alpha_i)) + phi_i + jitter_k;
 
-            // 3. Update the handle (Useful if debugging MAC traces)
-            // It must be an 8-bit integer, so we wrap it using modulo 255
-            params.m_msduHandle = seqNum % 255; 
+            // Ensure the deformed time doesn't schedule events past our simulation end
+            if (txTimeReal <= lastTrajectoryTime) {
+                
+                // 1. Encode the sequence number into a 4-byte buffer (Big Endian format)
+                uint8_t buffer[4];
+                buffer[0] = (seqNum >> 24) & 0xFF;
+                buffer[1] = (seqNum >> 16) & 0xFF;
+                buffer[2] = (seqNum >> 8) & 0xFF;
+                buffer[3] = seqNum & 0xFF;
 
-            // 4. Calculate the exact absolute time this packet should be fired
-            Time txTime = Seconds(t) + staggerOffset;
+                // 2. Create the packet containing our encoded payload
+                Ptr<Packet> p = Create<Packet>(buffer, 4);
 
-            // 5. Inject the event into the NS-3 Scheduler
-            Simulator::Schedule(txTime, 
-                                &LrWpanMac::McpsDataRequest, 
-                                macLayer, 
-                                params, 
-                                p);
-                               
+                // 3. Update the handle (Useful if debugging MAC traces)
+                params.m_msduHandle = seqNum % 255; 
+
+                // 4. Inject the event into the NS-3 Scheduler using the computed real time
+                Simulator::Schedule(Seconds(txTimeReal), 
+                                    &LrWpanMac::McpsDataRequest, 
+                                    macLayer, 
+                                    params, 
+                                    p);
+            }
 
             seqNum++; // Increment for the next transmission
+            t_nominal += TX_INTERVAL; // Advance the theoretical loop by the cycle time
         }
     }
 

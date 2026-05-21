@@ -59,5 +59,32 @@ floors, etc...
 Además, se ha refactorizado el código, para separar la lógica de lectura de los CSV en un CsvHelper, el cual facilita el código. Además, se han añadido 2 scripts para la obtención de los dados estrcturales del mapa usado en Gazebo (turtlebot3_house). El scrapper obtiene el csv, a partir del model.sdf y los .dae que requiere dicho sdf. Se puede validar gráficamente que el resultado represente correctamente al modelo visto en gazebo, usando validator.py.
 
 ```bash
-NS_GLOBAL_VALUE="RngRun=1" NS_LOG="SlamDataCollector=level_all|prefix_all:HybridBuildingsPropagationLossModel=level_all|prefix_all:CSV_HELPER=level_all|prefix_all" ./ns3 run "topology --pcap=false"
+NS_GLOBAL_VALUE="RngRun=1" NS_LOG="SlamDataCollector=level_all|prefix_all:HybridBuildingsPropagationLossModel=level_all|prefix_all:CSV_HELPER=level_all|prefix_all" ./ns3 run "topology --pcap=false --outputFile=scratch/Proyecto_ROS2_WSN/Outputs/slam_dataset_run1.csv"
 ```
+
+C++
+// 1. Instanciamos una variable aleatoria para el Jitter (ej. +/- 15 milisegundos)
+Ptr<UniformRandomVariable> jitter = CreateObject<UniformRandomVariable>();
+jitter->SetAttribute("Min", DoubleValue(-0.015));
+jitter->SetAttribute("Max", DoubleValue(0.015));
+
+for (uint32_t i = 0; i < numTransmitters; i++) {
+    // Simulamos que cada placa arranca en un momento aleatorio entre 0 y 200ms
+    Ptr<UniformRandomVariable> bootDelay = CreateObject<UniformRandomVariable>();
+    double bootTime = bootDelay->GetValue(0.0, 0.2); 
+
+    uint32_t seqNum = 0;
+    
+    // Fíjate que empezamos en bootTime, no en 0.0
+    for (double t = bootTime; t <= lastTrajectoryTime; t += txInterval) {
+        
+        // 2. Le sumamos el clock drift / jitter a cada disparo individual
+        double instanteAleatorio = t + jitter->GetValue();
+        Time txTime = Seconds(instanteAleatorio);
+
+        // ... (Creación del paquete y buffer igual que antes) ...
+
+        Simulator::Schedule(txTime, &LrWpanMac::McpsDataRequest, macLayer, params, p);
+        seqNum++;
+    }
+}
