@@ -52,9 +52,10 @@ main(int argc, char* argv[])
 {
 
     Time::SetResolution(Time::PS);
-    std::string trajectoryFilename = "scratch/Proyecto_ROS2_WSN/trajectory.csv";
-    std::string nodePositions = "scratch/Proyecto_ROS2_WSN/positions.csv";
-    std::string buildingFile = "scratch/Proyecto_ROS2_WSN/Modelo_TurtlebotWorld/buildings.csv";
+    std::string trajectoryFilename = "scratch/Proyecto_ROS2_WSN/Inputs/trajectory.csv";
+    std::string nodePositions = "scratch/Proyecto_ROS2_WSN/Inputs/positions.csv";
+    std::string buildingFile = "scratch/Proyecto_ROS2_WSN/Inputs/buildings.csv";
+    std::string outputFile = "scratch/Proyecto_ROS2_WSN/Outputs/slam_dataset_run1.csv";
     bool pcapTracing = false;
 
     CommandLine parameters;
@@ -62,6 +63,7 @@ main(int argc, char* argv[])
     parameters.AddValue("trajectoryFilename","Filename of Mobility Data",trajectoryFilename);
     parameters.AddValue("nodePositions","Filename of Mobility Data",nodePositions);
     parameters.AddValue("buildingFile","Filename of Buildings Data",buildingFile);
+    parameters.AddValue("outputFile", "Filename of outputFile", outputFile);
     parameters.Parse(argc,argv);
 
     // Helper Configuration
@@ -77,7 +79,7 @@ main(int argc, char* argv[])
 
     if(pcapTracing==true){
         // Enable PCAP for Robot
-        lrWpanHelper.EnablePcap("scratch/Proyecto_ROS2_WSN/pcap", devices.Get(devices.GetN()-1), true);
+        lrWpanHelper.EnablePcap("scratch/Proyecto_ROS2_WSN/Pcap/pcap", devices.Get(devices.GetN()-1), true);
     }
 
     // Set Robot in Sniffer Moder
@@ -116,7 +118,7 @@ main(int argc, char* argv[])
     // =========================================================================   
     // 1. Create the instance of our collector class.
     // This will open the CSV file and write the headers immediately.
-    SlamDataCollector collector("scratch/Proyecto_ROS2_WSN/slam_dataset_run1.csv");
+    SlamDataCollector collector(outputFile);
 
     uint32_t totalDevices = devices.GetN();
 

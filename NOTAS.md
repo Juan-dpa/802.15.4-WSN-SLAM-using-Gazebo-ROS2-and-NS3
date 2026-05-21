@@ -57,3 +57,7 @@ floors, etc...
 ```
 
 Además, se ha refactorizado el código, para separar la lógica de lectura de los CSV en un CsvHelper, el cual facilita el código. Además, se han añadido 2 scripts para la obtención de los dados estrcturales del mapa usado en Gazebo (turtlebot3_house). El scrapper obtiene el csv, a partir del model.sdf y los .dae que requiere dicho sdf. Se puede validar gráficamente que el resultado represente correctamente al modelo visto en gazebo, usando validator.py.
+
+```bash
+NS_GLOBAL_VALUE="RngRun=1" NS_LOG="SlamDataCollector=level_all|prefix_all:HybridBuildingsPropagationLossModel=level_all|prefix_all:CSV_HELPER=level_all|prefix_all" ./ns3 run "topology --pcap=false"
+```
