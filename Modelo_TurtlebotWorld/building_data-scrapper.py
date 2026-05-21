@@ -1,104 +1,103 @@
 import xml.etree.ElementTree as ET
 import csv
 import math
+import trimesh
+import os
 
 def parse_pose(pose_elem):
-    """Devuelve [x, y, z, roll, pitch, yaw] o ceros si no existe."""
+    """Extrae [x, y, z, roll, pitch, yaw] desde un elemento XML."""
     if pose_elem is not None and pose_elem.text:
         return list(map(float, pose_elem.text.strip().split()))
     return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
+def get_mesh_box(uri):
+    """Calcula el Bounding Box de un archivo .dae o .stl usando trimesh."""
+    # Ajusta la ruta base según dónde estén tus mallas relativas al script
+    mesh_path = uri.replace("model://turtlebot3_house/", "./meshes/") 
+    if os.path.exists(mesh_path):
+        mesh = trimesh.load(mesh_path, force='mesh')
+        # Obtenemos los límites (bounds) del objeto en su sistema local
+        return mesh.bounds[1] - mesh.bounds[0] # Tamaño [sx, sy, sz]
+    return [0.5, 0.5, 0.5] # Valor por defecto si no encuentra la malla
+
 def extract_boxes(root, writer):
-    # Crear un diccionario para poder "subir" por el árbol (hijo -> padre)
     parent_map = {c: p for p in root.iter() for c in p}
 
     for col in root.findall('.//collision'):
         geom = col.find('geometry')
-        if geom is None:
-            continue
+        if geom is None: continue
             
+        # 1. Determinar dimensiones y posibles Escalas
         box_elem = geom.find('box/size')
-        cyl_elem = geom.find('cylinder')
+        mesh_elem = geom.find('mesh/uri')
+        scale_elem = geom.find('mesh/scale') # Buscamos si hay escala
         
-        # Determinar el tamaño de la hitbox geométrica
+        # Valor de escala por defecto (X, Y, Z = 1.0)
+        scale_x, scale_y, scale_z = 1.0, 1.0, 1.0
+        if scale_elem is not None and scale_elem.text:
+            scale_x, scale_y, scale_z = map(float, scale_elem.text.strip().split())
+
         if box_elem is not None:
             sx, sy, sz = map(float, box_elem.text.strip().split())
-        elif cyl_elem is not None:
-            # Aproximar cilindro (patas de mesa) a un bounding box
-            r = float(cyl_elem.find('radius').text)
-            sz = float(cyl_elem.find('length').text)
-            sx, sy = r * 2.0, r * 2.0
+        elif mesh_elem is not None:
+            # Obtenemos las medidas del archivo .dae
+            sx_raw, sy_raw, sz_raw = get_mesh_box(mesh_elem.text)
+            # ¡Las dividimos por la escala que dice Gazebo!
+            sx = sx_raw / scale_x
+            sy = sy_raw / scale_y
+            sz = sz_raw / scale_z
         else:
-            continue # Ignoramos mallas 3D complejas
+            continue
 
-        # Rastrear la jerarquía hacia arriba (Colision -> Link -> Model -> Root)
+        # Subir por el árbol para sumar poses absolutas
         path = []
         curr = col
         while curr is not None:
             path.append(curr)
             curr = parent_map.get(curr)
 
-        # Extraer la altura Z absoluta sumando los offset de los padres
-        global_z = 0.0
-        for node in path:
+        # Cálculo de posición y rotación global acumulada
+        global_x, global_y, global_z = 0.0, 0.0, 0.0
+        total_yaw = 0.0
+        for node in reversed(path):
             pose_elem = node.find('pose')
-            _, _, tz, _, _, _ = parse_pose(pose_elem)
+            tx, ty, tz, _, _, yaw = parse_pose(pose_elem)
+            
+            global_x += (tx * math.cos(total_yaw) - ty * math.sin(total_yaw))
+            global_y += (tx * math.sin(total_yaw) + ty * math.cos(total_yaw))
             global_z += tz
-            
-        zMin = max(0.0, global_z - (sz / 2.0))
-        zMax = global_z + (sz / 2.0)
+            total_yaw += yaw
 
-        # Transformar las 4 esquinas del bounding box local a global
+        # Calcular límites finales
         dx, dy = sx / 2.0, sy / 2.0
-        local_corners = [(dx, dy), (dx, -dy), (-dx, dy), (-dx, -dy)]
-        global_corners_x = []
-        global_corners_y = []
-        
-        for cx, cy in local_corners:
-            gx, gy = cx, cy
-            # Aplicar traslación y rotación de cada padre (de abajo a arriba)
-            for node in path:
-                pose_elem = node.find('pose')
-                tx, ty, _, _, _, yaw = parse_pose(pose_elem)
-                nx = tx + (gx * math.cos(yaw) - gy * math.sin(yaw))
-                ny = ty + (gx * math.sin(yaw) + gy * math.cos(yaw))
-                gx, gy = nx, ny
-            global_corners_x.append(gx)
-            global_corners_y.append(gy)
+        corners = [(dx, dy), (dx, -dy), (-dx, dy), (-dx, -dy)]
+        xs, ys = [], []
+        for cx, cy in corners:
+            rx = cx * math.cos(total_yaw) - cy * math.sin(total_yaw)
+            ry = cx * math.sin(total_yaw) + cy * math.cos(total_yaw)
+            xs.append(global_x + rx)
+            ys.append(global_y + ry)
             
-        xMin, xMax = min(global_corners_x), max(global_corners_x)
-        yMin, yMax = min(global_corners_y), max(global_corners_y)
-
-        # Clasificación para NS-3
-        # Subimos al link para ver el nombre y decidir material
+        # Clasificación
         link_node = next((n for n in path if n.tag == 'link'), None)
         link_name = link_node.get('name', '').lower() if link_node is not None else ''
         
         if 'wall' in link_name:
-            b_type, w_type = 1, 1 # Office, ConcreteWithWindows
+            b_type, w_type = 1, 1 
         else:
-            b_type, w_type = 1, 0 # Office, Wood (Para mesas y armarios)
+            b_type, w_type = 1, 0 
 
-        # Filtrar minicajas invisibles (basura del diseño en Gazebo)
-        if (xMax - xMin) < 0.01 and (yMax - yMin) < 0.01:
+        # Filtro de minicajas
+        if (max(xs) - min(xs)) < 0.01 and (max(ys) - min(ys)) < 0.01:
             continue
 
-        writer.writerow([round(xMin, 3), round(xMax, 3), round(yMin, 3), round(yMax, 3), 
-                         round(zMin, 3), round(zMax, 3), b_type, w_type])
+        writer.writerow([round(min(xs), 3), round(max(xs), 3), 
+                         round(min(ys), 3), round(max(ys), 3), 
+                         round(max(0, global_z - sz/2), 3), round(global_z + sz/2, 3), b_type, w_type])
 
-def main():
-    xml_filepath = 'model.sdf'
-    csv_filepath = 'buildings.csv'
-    
-    tree = ET.parse(xml_filepath)
-    root = tree.getroot()
-
-    with open(csv_filepath, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['# xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax', 'BuildingType', 'ExtWallType'])
-        extract_boxes(root, writer)
-        
-    print(f"¡Análisis completo! Archivo de obstáculos NS-3 generado: {csv_filepath}")
-
-if __name__ == '__main__':
-    main()
+# --- Ejecución ---
+tree = ET.parse('model.sdf')
+with open('buildings.csv', 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['# xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax', 'Type', 'Wall'])
+    extract_boxes(tree.getroot(), writer)

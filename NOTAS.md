@@ -42,3 +42,18 @@ Modo depuración, para lanzar:
 ```bash
 NS_GLOBAL_VALUE="RngRun=1" NS_LOG="SlamDataCollector=level_all|prefix_all" ./ns3 run "topology --pcap=true"
 ```
+
+Se ha añadido la posibilidad de usar un modelo de perdidas de propagación mucho más fino. El modelo Hybrid permite utilizar diferentes algoritmos empíricos de manera automática, en base a las condiciones de cada transmisión. Referenciando al manual de NS3:
+
+```
+This model includes Hata model, COST231, ITU-R P.1411 (short range communications), ITU-R P.1238 (indoor communications), which are combined in order to be able to evaluate the pathloss under different scenarios, in detail:
+
+Environments: urban, suburban, open-areas;
+frequency: from 200 uo to 2600 MHz
+short range communications vs long range communications
+Node position respect to buildings: indoor, outdoor and hybrid (indoor <-> outdoor)
+Building penetretation loss
+floors, etc...
+```
+
+Además, se ha refactorizado el código, para separar la lógica de lectura de los CSV en un CsvHelper, el cual facilita el código. Además, se han añadido 2 scripts para la obtención de los dados estrcturales del mapa usado en Gazebo (turtlebot3_house). El scrapper obtiene el csv, a partir del model.sdf y los .dae que requiere dicho sdf. Se puede validar gráficamente que el resultado represente correctamente al modelo visto en gazebo, usando validator.py.

@@ -31,6 +31,7 @@
 #include <iostream>
 
 #include "SlamDataCollector.h"
+#include "CsvScenarioHelper.h"
 
 // DEFINES
 
@@ -53,39 +54,25 @@ main(int argc, char* argv[])
     Time::SetResolution(Time::PS);
     std::string trajectoryFilename = "scratch/Proyecto_ROS2_WSN/trajectory.csv";
     std::string nodePositions = "scratch/Proyecto_ROS2_WSN/positions.csv";
+    std::string buildingFile = "scratch/Proyecto_ROS2_WSN/Modelo_TurtlebotWorld/buildings.csv";
     bool pcapTracing = false;
-    //bool verificationMode = false;
 
     CommandLine parameters;
     parameters.AddValue("pcap", "Flag for generating pcap of traffic",pcapTracing);
     parameters.AddValue("trajectoryFilename","Filename of Mobility Data",trajectoryFilename);
     parameters.AddValue("nodePositions","Filename of Mobility Data",nodePositions);
-    //parameters.AddValue("verif", "Flag for running the simulation in verification mode" , verificationMode);
+    parameters.AddValue("buildingFile","Filename of Buildings Data",buildingFile);
     parameters.Parse(argc,argv);
 
     // Helper Configuration
     LrWpanHelper lrWpanHelper;
     lrWpanHelper.SetPropagationDelayModel("ns3::ConstantSpeedPropagationDelayModel");
-    lrWpanHelper.AddPropagationLossModel("ns3::LogDistancePropagationLossModel"); 
-
-    //NakagamiPropagationLossModel Implementation
-    // Adapt the cutoff distances for an Indoor topology (in meters)
-    // m0: LOS (Very short distances)
-    // m1: NLOS (Transitions to Rayleigh fading after Distance1)
-    // m2: NLOS (Remains in Rayleigh fading after Distance2)
-    // TODO: Investigate references for the parameters. Distance depends heavily on the actual topology defined in nodePositions(csv)
-    // That must be correlated in code.
-    lrWpanHelper.AddPropagationLossModel(
-        "ns3::NakagamiPropagationLossModel",
-        "m0", DoubleValue(1.5), 
-        "m1", DoubleValue(1.0), 
-        "m2", DoubleValue(1.0), 
-        "Distance1", DoubleValue(5.0), 
-        "Distance2", DoubleValue(15.0) 
-    );
+    lrWpanHelper.AddPropagationLossModel("ns3::HybridBuildingsPropagationLossModel");
 
     NodeContainer nodes;
     nodes.Create(NUMBER_COORDINATORS+NUMBER_EDS+NUMBER_ROBOTS); 
+
+    
     NetDeviceContainer devices = lrWpanHelper.Install(nodes);
 
     if(pcapTracing==true){
@@ -109,99 +96,23 @@ main(int argc, char* argv[])
     Ptr<Node> robot = nodes.Get(nodes.GetN() - 1);
     Ptr<WaypointMobilityModel> robotMobilityModel = CreateObject<WaypointMobilityModel>();
 
-    // Open and Read trajectoryFilename
-    std::ifstream trajectoryFile(trajectoryFilename);
-    if (!trajectoryFile.is_open()) {
-        NS_FATAL_ERROR("Error opening: " << trajectoryFilename);
-    }
-
-    // Last instant of movement should cover most of SimulationTime
-    double lastTrajectoryTime = 0;
-
-    std::string line;
-    while (std::getline(trajectoryFile, line)) {
-        // Ignoring comments or empty lines
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-
-        std::stringstream ss(line);
-        std::string item;
-        double t, x, y, z;
-
-        // Parse the 4 comma-separated values
-        if (std::getline(ss, item, ',')) t = std::stod(item);
-        if (std::getline(ss, item, ',')) x = std::stod(item);
-        if (std::getline(ss, item, ',')) y = std::stod(item);
-        if (std::getline(ss, item, ',')) z = std::stod(item);
-
-        robotMobilityModel->AddWaypoint(Waypoint(Seconds(t), Vector(x, y, z)));
-        lastTrajectoryTime = t;
-
-    }
-    trajectoryFile.close();
-
-    // Finally, we add the mobility model directly to the Robot
-    // IMPORTANT: While reading the way the physical layer sets its MobilityModel,
-    // it's shown that you can either set it from that layer or, as last resort,
-    // its DoInitialize method (executes at Simulator::Run) will get it from the node itself.
-    // Some parts of the simulator probably depend on the same fallback.
-    // So it's a better method to set it with node->AggregateObject(mobility)
-    // instead of using the helper.
-    robot->AggregateObject(robotMobilityModel);
-
+    double lastTrajectoryTime = CsvScenarioHelper::LoadTrajectory(trajectoryFilename,robotMobilityModel, robot);
+    uint32_t totalNodes = nodes.GetN();
+    
     // =========================================================================
     // 3. MobilityModel for both the Coordinator and EndDevices (Static)
     // =========================================================================
-    // IMPORTANT: First position of the CSV is coordinator's position
-    std::ifstream positionsFile(nodePositions);
-    if (!positionsFile.is_open()) {
-        NS_FATAL_ERROR("Error: Could not open the node positions file: " << nodePositions);
-    }
-
-    uint32_t nodeIndex = 0;
-    uint32_t totalNodes = nodes.GetN();
-
-    while (std::getline(positionsFile, line)) {
-        // Ignore empty lines or comments (lines starting with '#')
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-
-        if (nodeIndex >= totalNodes - 1) {
-            NS_LOG_WARN("CSV contains more positions than available static nodes. Ignoring extra rows.");
-            break;
-        }
-
-        std::stringstream ss(line);
-        std::string item;
-        double x = 0.0, y = 0.0, z = 0.0;
-
-        // Parse the X, Y, Z coordinates
-        if (std::getline(ss, item, ',')) x = std::stod(item);
-        if (std::getline(ss, item, ',')) y = std::stod(item);
-        if (std::getline(ss, item, ',')) z = std::stod(item);
-
-        // Create and configure the ConstantPositionMobilityModel
-        Ptr<ConstantPositionMobilityModel> staticMobility = CreateObject<ConstantPositionMobilityModel>();
-        staticMobility->SetPosition(Vector(x, y, z));
-
-        // Assign the mobility model directly to the node via aggregation
-        nodes.Get(nodeIndex)->AggregateObject(staticMobility);
-
-        nodeIndex++;
-    }
-
-    positionsFile.close();
-
-    // Sanity check: Ensure the CSV provided exactly N-1 positions
-    if (nodeIndex < totalNodes - 1) {
-        NS_FATAL_ERROR("Error: The CSV file contains fewer positions (" << nodeIndex 
-                       << ") than the required static nodes (" << totalNodes - 1 << ").");
-    }
+    CsvScenarioHelper::LoadStaticPositions(nodePositions, nodes);
 
     // =========================================================================
-    // 4. Instantiate the Data Collector and Connect MAC SAP Callbacks
+    // 4. BuildingData for LossModel
+    // =========================================================================
+    CsvScenarioHelper::LoadBuildings(buildingFile);
+    BuildingsHelper buildHelp;
+    buildHelp.Install(nodes);
+
+    // =========================================================================
+    // 5. Instantiate the Data Collector and Connect MAC SAP Callbacks
     // =========================================================================   
     // 1. Create the instance of our collector class.
     // This will open the CSV file and write the headers immediately.
@@ -230,7 +141,7 @@ main(int argc, char* argv[])
     }
 
     // =========================================================================
-    // 5. Schedule Data Transmissions (McpsDataRequest)
+    // 6. Schedule Data Transmissions (McpsDataRequest)
     // =========================================================================
     // Setup the common parameters for a broadcast transmission
     McpsDataRequestParams params;

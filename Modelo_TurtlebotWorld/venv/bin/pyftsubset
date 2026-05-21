@@ -1,0 +1,8 @@
+#!/home/juadelavi/NS3-3.47/ns-allinone-3.47/ns-3.47/scratch/Proyecto_ROS2_WSN/Modelo_TurtlebotWorld/venv/bin/python3
+# -*- coding: utf-8 -*-
+import re
+import sys
+from fontTools.subset import main
+if __name__ == '__main__':
+    sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
+    sys.exit(main())
