@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+import csv
+import json
+import math
+import re
+from pathlib import Path as FilePath
+
+import rclpy
+from builtin_interfaces.msg import Time
+from geometry_msgs.msg import PoseStamped, TransformStamped
+from nav_msgs.msg import Odometry, Path as RosPath
+from rclpy.node import Node
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header, String
+from tf2_ros import TransformBroadcaster
+from visualization_msgs.msg import Marker, MarkerArray
+
+try:
+    from rssi_slam_core import RssiRangeISAM, RssiSlamConfig
+except ImportError:
+    import sys
+
+    sys.path.append(str(FilePath(__file__).resolve().parent))
+    from rssi_slam_core import RssiRangeISAM, RssiSlamConfig
+
+
+def default_project_path(*parts):
+    return str((FilePath(__file__).resolve().parent / ".." / FilePath(*parts)).resolve())
+
+
+def seconds_to_stamp(seconds):
+    seconds = max(0.0, float(seconds))
+    sec = int(math.floor(seconds))
+    nanosec = int(round((seconds - sec) * 1e9))
+    if nanosec >= 1_000_000_000:
+        sec += 1
+        nanosec -= 1_000_000_000
+    return Time(sec=sec, nanosec=nanosec)
+
+
+def quaternion_from_yaw(yaw):
+    half = 0.5 * yaw
+    return 0.0, 0.0, math.sin(half), math.cos(half)
+
+
+def color_for_mac(mac, alpha=1.0):
+    palette = [
+        (0.121, 0.466, 0.705),
+        (1.000, 0.498, 0.054),
+        (0.172, 0.627, 0.172),
+        (0.839, 0.153, 0.157),
+        (0.580, 0.404, 0.741),
+        (0.549, 0.337, 0.294),
+    ]
+    idx = sum(ord(char) for char in mac) % len(palette)
+    r, g, b = palette[idx]
+    return r, g, b, alpha
+
+
+def read_odom_csv(path):
+    rows = []
+    with open(path, newline="") as handle:
+        reader = csv.reader(handle)
+        for raw in reader:
+            if not raw or raw[0].strip().startswith("#"):
+                continue
+            if len(raw) < 4:
+                continue
+            try:
+                rows.append((float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3])))
+            except ValueError:
+                continue
+    rows.sort(key=lambda row: row[0])
+    if not rows:
+        raise ValueError(f"No odometry rows found in {path}")
+    return rows
+
+
+def read_rssi_csv(path):
+    rows = []
+    with open(path, newline="") as handle:
+        reader = csv.reader(handle)
+        for raw in reader:
+            if not raw or raw[0].strip().startswith("#"):
+                continue
+            if len(raw) < 4:
+                continue
+            try:
+                rows.append((float(raw[0]), raw[1].strip(), float(raw[3])))
+            except ValueError:
+                continue
+    rows.sort(key=lambda row: row[0])
+    if not rows:
+        raise ValueError(f"No RSSI rows found in {path}")
+    return rows
+
+
+class RssiSlamReplayNode(Node):
+    def __init__(self):
+        super().__init__("rssi_slam_replay_node")
+        self.declare_parameter("odom_csv", default_project_path("Inputs", "trajectory_odom-synthetic.csv"))
+        self.declare_parameter("rssi_csv", default_project_path("Outputs", "slam_dataset_run1-synthetic.csv"))
+        self.declare_parameter("frame_id", "map")
+        self.declare_parameter("robot_frame_id", "base_link")
+        self.declare_parameter("odom_frame_id", "odom")
+        self.declare_parameter("publish_period_s", 0.05)
+        self.declare_parameter("odom_rows_per_tick", 1)
+        self.declare_parameter("loop", False)
+        self.declare_parameter("use_csv_time_stamps", False)
+        self.declare_parameter("publish_clock", False)
+
+        self.declare_parameter("ap_marker_z", 1.5)
+        self.declare_parameter("ap_marker_scale", 1.5)
+        self.declare_parameter("heatmap_z", 0.05)
+
+        self.declare_parameter("path_loss_exponent", 4.4)
+        self.declare_parameter("rssi_sigma_db", 6.0)
+        self.declare_parameter("min_landmark_init_baseline_m", 60.0)
+        self.declare_parameter("heatmap_resolution_m", 2.0)
+        self.declare_parameter("heatmap_decay", 0.995)
+        self.declare_parameter("heatmap_min_x", 0.0)
+        self.declare_parameter("heatmap_max_x", 100.0)
+        self.declare_parameter("heatmap_min_y", 0.0)
+        self.declare_parameter("heatmap_max_y", 100.0)
+
+        self.frame_id = self.get_parameter("frame_id").value
+        self.robot_frame_id = self.get_parameter("robot_frame_id").value
+        self.odom_frame_id = self.get_parameter("odom_frame_id").value
+        self.odom_rows = read_odom_csv(self.get_parameter("odom_csv").value)
+        self.rssi_rows = read_rssi_csv(self.get_parameter("rssi_csv").value)
+        self.odom_index = 0
+        self.rssi_index = 0
+        self.path_msg = RosPath()
+        self.path_msg.header.frame_id = self.frame_id
+
+        cfg = RssiSlamConfig(
+            path_loss_exponent=self.get_parameter("path_loss_exponent").value,
+            rssi_sigma_db=self.get_parameter("rssi_sigma_db").value,
+            min_landmark_init_baseline_m=self.get_parameter("min_landmark_init_baseline_m").value,
+            heatmap_resolution_m=self.get_parameter("heatmap_resolution_m").value,
+            heatmap_decay=self.get_parameter("heatmap_decay").value,
+            heatmap_min_x=self.get_parameter("heatmap_min_x").value,
+            heatmap_max_x=self.get_parameter("heatmap_max_x").value,
+            heatmap_min_y=self.get_parameter("heatmap_min_y").value,
+            heatmap_max_y=self.get_parameter("heatmap_max_y").value,
+        )
+        self.slam = RssiRangeISAM(cfg)
+        self.latest_snapshot = self.slam.snapshot()
+        self.current_pose = None
+
+        self.clock_pub = self.create_publisher(Clock, "/clock", 10)
+        self.odom_pub = self.create_publisher(Odometry, "/odom_replay", 10)
+        self.path_pub = self.create_publisher(RosPath, "/path_replay", 10)
+        self.marker_pub = self.create_publisher(MarkerArray, "/ap_markers", 10)
+        self.heatmap_pub = self.create_publisher(PointCloud2, "/rssi_heatmap", 10)
+        self.heatmap_pubs_by_mac = {}
+        self.heatmap_topics_by_mac = {}
+        self.status_pub = self.create_publisher(String, "/rssi_slam_status", 10)
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        self.timer = self.create_timer(float(self.get_parameter("publish_period_s").value), self.on_timer)
+        self.get_logger().info(
+            "RSSI SLAM replay ready: "
+            f"odom_rows={len(self.odom_rows)}, rssi_rows={len(self.rssi_rows)}, "
+            f"odom_csv={self.get_parameter('odom_csv').value}, rssi_csv={self.get_parameter('rssi_csv').value}"
+        )
+
+    def on_timer(self):
+        rows_per_tick = max(1, int(self.get_parameter("odom_rows_per_tick").value))
+        for _ in range(rows_per_tick):
+            if self.odom_index >= len(self.odom_rows):
+                if self.get_parameter("loop").value:
+                    self.reset_replay()
+                else:
+                    self.publish_visuals()
+                    return
+            self.step_once()
+        self.publish_visuals()
+
+    def reset_replay(self):
+        self.odom_index = 0
+        self.rssi_index = 0
+        self.path_msg.poses.clear()
+        self.slam = RssiRangeISAM(self.slam.cfg)
+        self.latest_snapshot = self.slam.snapshot()
+        self.current_pose = None
+
+    def step_once(self):
+        time_s, x, y, theta = self.odom_rows[self.odom_index]
+        while self.rssi_index < len(self.rssi_rows) and self.rssi_rows[self.rssi_index][0] <= time_s:
+            rssi_time, mac, rssi_dbm = self.rssi_rows[self.rssi_index]
+            self.latest_snapshot = self.slam.add_rssi(rssi_time, mac, rssi_dbm)
+            self.rssi_index += 1
+
+        self.latest_snapshot = self.slam.add_odometry(time_s, x, y, theta)
+        self.current_pose = (time_s, x, y, theta)
+        self.append_path_pose(time_s, x, y, theta)
+        self.odom_index += 1
+
+    def append_path_pose(self, time_s, x, y, theta):
+        stamp = self.current_stamp(time_s)
+        pose = PoseStamped()
+        pose.header.frame_id = self.frame_id
+        pose.header.stamp = stamp
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.position.z = 0.0
+        qx, qy, qz, qw = quaternion_from_yaw(theta)
+        pose.pose.orientation.x = qx
+        pose.pose.orientation.y = qy
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        self.path_msg.header.stamp = stamp
+        self.path_msg.poses.append(pose)
+
+    def publish_visuals(self):
+        if self.current_pose is None:
+            return
+        time_s, x, y, theta = self.current_pose
+        stamp = self.current_stamp(time_s)
+        if self.get_parameter("publish_clock").value:
+            self.clock_pub.publish(Clock(clock=seconds_to_stamp(time_s)))
+        self.publish_tf(stamp, x, y, theta)
+        self.odom_pub.publish(self.make_odom(stamp, x, y, theta))
+        self.path_pub.publish(self.path_msg)
+        self.marker_pub.publish(self.make_ap_markers(self.latest_snapshot, stamp))
+        self.heatmap_pub.publish(self.make_heatmap_cloud(self.latest_snapshot["heatmap_points"], stamp))
+        self.publish_heatmaps_by_mac(self.latest_snapshot, stamp)
+        self.status_pub.publish(String(data=json.dumps(self.make_status(self.latest_snapshot), sort_keys=True)))
+
+    def current_stamp(self, csv_time_s):
+        if self.get_parameter("use_csv_time_stamps").value:
+            return seconds_to_stamp(csv_time_s)
+        return self.get_clock().now().to_msg()
+
+    def publish_tf(self, stamp, x, y, theta):
+        transform = TransformStamped()
+        transform.header.stamp = stamp
+        transform.header.frame_id = self.frame_id
+        transform.child_frame_id = self.robot_frame_id
+        transform.transform.translation.x = x
+        transform.transform.translation.y = y
+        transform.transform.translation.z = 0.0
+        qx, qy, qz, qw = quaternion_from_yaw(theta)
+        transform.transform.rotation.x = qx
+        transform.transform.rotation.y = qy
+        transform.transform.rotation.z = qz
+        transform.transform.rotation.w = qw
+        self.tf_broadcaster.sendTransform(transform)
+
+    def make_odom(self, stamp, x, y, theta):
+        msg = Odometry()
+        msg.header.frame_id = self.frame_id
+        msg.header.stamp = stamp
+        msg.child_frame_id = self.robot_frame_id
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.position.z = 0.0
+        qx, qy, qz, qw = quaternion_from_yaw(theta)
+        msg.pose.pose.orientation.x = qx
+        msg.pose.pose.orientation.y = qy
+        msg.pose.pose.orientation.z = qz
+        msg.pose.pose.orientation.w = qw
+        return msg
+
+    def make_ap_markers(self, snapshot, stamp):
+        markers = MarkerArray()
+        marker_z = float(self.get_parameter("ap_marker_z").value)
+        marker_scale = float(self.get_parameter("ap_marker_scale").value)
+
+        for landmark in snapshot["landmarks"]:
+            marker_id = int(landmark["id"])
+            r, g, b, a = color_for_mac(landmark["mac"], 0.95)
+
+            sphere = Marker()
+            sphere.header.frame_id = self.frame_id
+            sphere.header.stamp = stamp
+            sphere.ns = "ap_estimates"
+            sphere.id = marker_id
+            sphere.type = Marker.SPHERE
+            sphere.action = Marker.ADD
+            sphere.pose.position.x = landmark["x"]
+            sphere.pose.position.y = landmark["y"]
+            sphere.pose.position.z = marker_z
+            sphere.pose.orientation.w = 1.0
+            sphere.scale.x = marker_scale
+            sphere.scale.y = marker_scale
+            sphere.scale.z = marker_scale
+            sphere.color.r = r
+            sphere.color.g = g
+            sphere.color.b = b
+            sphere.color.a = a
+            markers.markers.append(sphere)
+
+            label = Marker()
+            label.header.frame_id = self.frame_id
+            label.header.stamp = stamp
+            label.ns = "ap_labels"
+            label.id = 10000 + marker_id
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = landmark["x"]
+            label.pose.position.y = landmark["y"]
+            label.pose.position.z = marker_z + marker_scale
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.8
+            label.color.r = 1.0
+            label.color.g = 1.0
+            label.color.b = 1.0
+            label.color.a = 1.0
+            label.text = landmark["mac"]
+            markers.markers.append(label)
+
+        return markers
+
+    def publish_heatmaps_by_mac(self, snapshot, stamp):
+        for mac, points in snapshot["heatmap_points_by_mac"].items():
+            publisher = self.heatmap_publisher_for_mac(mac)
+            publisher.publish(self.make_heatmap_cloud(points, stamp))
+
+    def heatmap_publisher_for_mac(self, mac):
+        if mac not in self.heatmap_pubs_by_mac:
+            suffix = self.topic_suffix_from_mac(mac)
+            topic = f"/rssi_heatmap/{suffix}"
+            self.heatmap_pubs_by_mac[mac] = self.create_publisher(PointCloud2, topic, 10)
+            self.heatmap_topics_by_mac[mac] = topic
+            self.get_logger().info(f"Publishing AP-specific heatmap for {mac} on {topic}")
+        return self.heatmap_pubs_by_mac[mac]
+
+    @staticmethod
+    def topic_suffix_from_mac(mac):
+        safe = re.sub(r"[^A-Za-z0-9_]", "_", mac.strip())
+        return f"ap_{safe}"
+
+    def make_heatmap_cloud(self, heatmap_points, stamp):
+        header = Header()
+        header.frame_id = self.frame_id
+        header.stamp = stamp
+        z = float(self.get_parameter("heatmap_z").value)
+        points = [(x, y, z, intensity) for x, y, intensity in heatmap_points]
+        fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        return point_cloud2.create_cloud(header, fields, points)
+
+    def make_status(self, snapshot):
+        return {
+            "csv_time_s": snapshot["time_s"],
+            "initialized": snapshot["initialized"],
+            "update_index": snapshot["update_index"],
+            "pose_key": snapshot["pose_key"],
+            "landmarks": snapshot["landmarks"],
+            "heatmap_topics_by_mac": self.heatmap_topics_by_mac,
+            "pending_rssi": snapshot["pending_rssi"],
+        }
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = RssiSlamReplayNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

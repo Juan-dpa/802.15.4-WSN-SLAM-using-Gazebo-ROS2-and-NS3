@@ -37,7 +37,7 @@
 
 #define PAN_ID 0xAAAA
 #define NUMBER_COORDINATORS 1
-#define NUMBER_EDS 8
+#define NUMBER_EDS 3
 #define NUMBER_ROBOTS 1
 #define BROADCAST_ADDR "ff:ff"
 #define SIMULATION_TIME_BUFFER 1
@@ -156,7 +156,6 @@ main(int argc, char* argv[])
     // STOCHASTIC MODELS INITIALIZATION (Parametrized for real IoT Hardware)
     // Instantiated outside the loop to prevent memory leaks and optimize execution
     // ==============================================================================
-
     // 1. Clock Drift / Skew (Hardware derivation specific to the node)
     // Distribution: Normal, Mean = 0, StdDev = 10 ppm (Variance = 1e-10)
     Ptr<NormalRandomVariable> clockSkewVar = CreateObject<NormalRandomVariable>();
@@ -180,12 +179,11 @@ main(int argc, char* argv[])
     // ==============================================================================
     // TRANSMISSION SCHEDULING LOOP
     // ==============================================================================
-
     // Iterate through all static transmitters
     for (uint32_t i = 0; i < NUMBER_EDS; i++) {
         
         // Retrieve the MAC layer pointer for the current transmitter
-        Ptr<LrWpanMac> macLayer = devices.Get(i)->GetObject<LrWpanNetDevice>()->GetMac();
+        Ptr<LrWpanMac> macLayer = devices.Get(i+1)->GetObject<LrWpanNetDevice>()->GetMac();
 
         // Engineer's Perfect TDMA Stagger (e.g., Node 0 at 0ms, Node 1 at 50ms...)
         double baseStagger = i * 0.050; // Represented directly in seconds
