@@ -61,6 +61,8 @@ DEFAULT_STYLE = {
     "zorder": 3,
 }
 
+POSITION_MARKERS = ["*", "o", "s", "^", "D", "P"]
+
 
 def resolve_path(path):
     path = Path(path)
@@ -101,6 +103,27 @@ def read_boxes(csv_filename):
     return boxes
 
 
+def read_positions(csv_filename):
+    positions = []
+    with open(csv_filename, "r", newline="") as f:
+        reader = csv.reader(f)
+        for line_number, row in enumerate(reader, start=1):
+            if not row or row[0].strip().startswith("#"):
+                continue
+            if len(row) < 3:
+                print(f"Aviso: posicion {line_number} ignorada, columnas insuficientes: {row}")
+                continue
+
+            try:
+                x, y, z = map(float, row[:3])
+            except ValueError:
+                print(f"Aviso: posicion {line_number} ignorada, valores no numericos: {row}")
+                continue
+
+            positions.append({"x": x, "y": y, "z": z})
+    return positions
+
+
 def get_style(box):
     return STYLES.get((box["type"], box["wall"]), DEFAULT_STYLE)
 
@@ -123,11 +146,57 @@ def add_box(ax, box):
     ax.add_patch(rect)
 
 
-def set_limits(ax, boxes):
-    xmin = min(box["xmin"] for box in boxes)
-    xmax = max(box["xmax"] for box in boxes)
-    ymin = min(box["ymin"] for box in boxes)
-    ymax = max(box["ymax"] for box in boxes)
+def point_inside_box(position, box, include_z=True):
+    inside_xy = (
+        box["xmin"] <= position["x"] <= box["xmax"]
+        and box["ymin"] <= position["y"] <= box["ymax"]
+    )
+    if not include_z:
+        return inside_xy
+    return inside_xy and box["zmin"] <= position["z"] <= box["zmax"]
+
+
+def add_positions(ax, positions, boxes):
+    labels = ["Coordinator", "ED1", "ED2", "ED3"]
+    for index, position in enumerate(positions):
+        inside_xyz = any(point_inside_box(position, box, include_z=True) for box in boxes)
+        inside_xy = any(point_inside_box(position, box, include_z=False) for box in boxes)
+        marker = POSITION_MARKERS[index % len(POSITION_MARKERS)]
+        color = "#d62728" if inside_xyz else "#ff7f0e" if inside_xy else "#1f77b4"
+        label = labels[index] if index < len(labels) else f"Node {index}"
+
+        ax.scatter(
+            position["x"],
+            position["y"],
+            marker=marker,
+            s=130 if index == 0 else 82,
+            c=color,
+            edgecolors="black",
+            linewidths=0.8,
+            zorder=10,
+        )
+        ax.annotate(
+            label,
+            (position["x"], position["y"]),
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=8,
+            color="#111111",
+            zorder=11,
+        )
+
+
+def set_limits(ax, boxes, positions=None):
+    xs = [box["xmin"] for box in boxes] + [box["xmax"] for box in boxes]
+    ys = [box["ymin"] for box in boxes] + [box["ymax"] for box in boxes]
+    if positions:
+        xs.extend(position["x"] for position in positions)
+        ys.extend(position["y"] for position in positions)
+
+    xmin = min(xs)
+    xmax = max(xs)
+    ymin = min(ys)
+    ymax = max(ys)
 
     span = max(xmax - xmin, ymax - ymin)
     margin = max(span * 0.04, 1.0)
@@ -137,7 +206,7 @@ def set_limits(ax, boxes):
     ax.set_aspect("equal", adjustable="box")
 
 
-def make_legend(ax, boxes):
+def make_legend(ax, boxes, positions=None):
     used_keys = []
     for box in boxes:
         key = (box["type"], box["wall"])
@@ -161,6 +230,15 @@ def make_legend(ax, boxes):
             )
         )
 
+    if positions:
+        handles.extend(
+            [
+                Patch(facecolor="#1f77b4", edgecolor="black", label="Nodo libre"),
+                Patch(facecolor="#ff7f0e", edgecolor="black", label="Nodo sobre obstaculo en XY"),
+                Patch(facecolor="#d62728", edgecolor="black", label="Nodo dentro de volumen"),
+            ]
+        )
+
     ax.legend(handles=handles, loc="upper right", framealpha=0.94)
 
 
@@ -177,22 +255,53 @@ def print_summary(boxes):
         print(f"  Type={key[0]} ({type_name}), Wall={key[1]} ({wall_name}): {count}")
 
 
-def plot_2d_boxes(csv_filename, output=None, show=False):
+def print_position_summary(positions, boxes):
+    if not positions:
+        return
+
+    labels = ["Coordinator", "ED1", "ED2", "ED3"]
+    print(f"Posiciones cargadas: {len(positions)}")
+    for index, position in enumerate(positions):
+        label = labels[index] if index < len(labels) else f"Node {index}"
+        inside_xyz = [
+            box for box in boxes if point_inside_box(position, box, include_z=True)
+        ]
+        inside_xy = [
+            box for box in boxes if point_inside_box(position, box, include_z=False)
+        ]
+        status = "libre"
+        if inside_xyz:
+            status = "DENTRO de volumen"
+        elif inside_xy:
+            status = "encima en XY, fuera por Z"
+        print(
+            f"  {label}: ({position['x']}, {position['y']}, {position['z']}) -> "
+            f"{status}; solapes XY={len(inside_xy)}, solapes XYZ={len(inside_xyz)}"
+        )
+
+
+def plot_2d_boxes(csv_filename, output=None, show=False, positions_file=None):
     csv_path = resolve_path(csv_filename)
     boxes = read_boxes(csv_path)
     if not boxes:
         print(f"No hay obstaculos validos en {csv_path}")
         return
 
+    positions = read_positions(resolve_path(positions_file)) if positions_file else []
+
     print_summary(boxes)
+    print_position_summary(positions, boxes)
 
     fig, ax = plt.subplots(figsize=(11, 9))
 
     for box in sorted(boxes, key=lambda item: get_style(item)["zorder"]):
         add_box(ax, box)
 
-    set_limits(ax, boxes)
-    make_legend(ax, boxes)
+    if positions:
+        add_positions(ax, positions, boxes)
+
+    set_limits(ax, boxes, positions=positions)
+    make_legend(ax, boxes, positions=positions)
 
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
@@ -215,13 +324,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Valida en 2D un CSV de obstaculos para ns-3.")
     parser.add_argument("csv", nargs="?", default="agriculture.csv")
     parser.add_argument("-o", "--output", help="Ruta de la imagen PNG de salida.")
+    parser.add_argument("--positions", help="CSV de posiciones estaticas X,Y,Z para superponer nodos.")
     parser.add_argument("--show", action="store_true", help="Muestra la ventana de matplotlib.")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    plot_2d_boxes(args.csv, output=args.output, show=args.show)
+    plot_2d_boxes(args.csv, output=args.output, show=args.show, positions_file=args.positions)
 
 
 if __name__ == "__main__":
