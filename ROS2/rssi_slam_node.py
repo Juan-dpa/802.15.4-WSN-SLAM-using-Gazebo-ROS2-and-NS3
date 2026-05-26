@@ -7,7 +7,7 @@ from pathlib import Path as FilePath
 
 import rclpy
 from builtin_interfaces.msg import Time
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import Point, PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry, Path as RosPath
 from rclpy.node import Node
 from rosgraph_msgs.msg import Clock
@@ -26,8 +26,18 @@ except ImportError:
     from rssi_slam_core import RssiRangeISAM, RssiSlamConfig
 
 
-def default_project_path(*parts):
-    return str((FilePath(__file__).resolve().parent / ".." / FilePath(*parts)).resolve())
+def resolve_existing_path(path):
+    raw = FilePath(str(path)).expanduser()
+    candidates = [
+        raw,
+        FilePath.cwd() / raw,
+        FilePath(__file__).resolve().parent / raw,
+        FilePath(__file__).resolve().parent / ".." / raw,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str(raw)
 
 
 def seconds_to_stamp(seconds):
@@ -45,6 +55,14 @@ def quaternion_from_yaw(yaw):
     return 0.0, 0.0, math.sin(half), math.cos(half)
 
 
+def make_point(x, y, z):
+    point = Point()
+    point.x = float(x)
+    point.y = float(y)
+    point.z = float(z)
+    return point
+
+
 def color_for_mac(mac, alpha=1.0):
     palette = [
         (0.121, 0.466, 0.705),
@@ -57,6 +75,23 @@ def color_for_mac(mac, alpha=1.0):
     idx = sum(ord(char) for char in mac) % len(palette)
     r, g, b = palette[idx]
     return r, g, b, alpha
+
+
+def error_color(error_m, good_m, bad_m, alpha=1.0):
+    if bad_m <= good_m:
+        bad_m = good_m + 1e-6
+    t = min(max((error_m - good_m) / (bad_m - good_m), 0.0), 1.0)
+    green = (0.172, 0.627, 0.172)
+    yellow = (1.000, 0.780, 0.120)
+    red = (0.839, 0.153, 0.157)
+    if t < 0.5:
+        local = t / 0.5
+        start, end = green, yellow
+    else:
+        local = (t - 0.5) / 0.5
+        start, end = yellow, red
+    color = tuple(start[i] * (1.0 - local) + end[i] * local for i in range(3))
+    return color[0], color[1], color[2], alpha
 
 
 def read_odom_csv(path):
@@ -97,11 +132,53 @@ def read_rssi_csv(path):
     return rows
 
 
+def ordered_macs_from_rssi_rows(rows):
+    macs = []
+    seen = set()
+    for _, mac, _ in rows:
+        if mac not in seen:
+            seen.add(mac)
+            macs.append(mac)
+    return macs
+
+
+def read_positions_csv(path, macs, position_start_row):
+    if not path:
+        return {}
+    resolved_path = resolve_existing_path(path)
+    if not FilePath(resolved_path).exists():
+        return {}
+
+    rows = []
+    with open(resolved_path, newline="") as handle:
+        reader = csv.reader(handle)
+        for raw in reader:
+            if not raw or raw[0].strip().startswith("#"):
+                continue
+            if len(raw) < 2:
+                continue
+            try:
+                z = float(raw[2]) if len(raw) > 2 else 0.0
+                rows.append((float(raw[0]), float(raw[1]), z))
+            except ValueError:
+                continue
+
+    true_positions = {}
+    for idx, mac in enumerate(macs):
+        row_idx = int(position_start_row) + idx
+        if row_idx >= len(rows):
+            break
+        true_positions[mac] = rows[row_idx]
+    return true_positions
+
+
 class RssiSlamReplayNode(Node):
     def __init__(self):
         super().__init__("rssi_slam_replay_node")
-        self.declare_parameter("odom_csv", default_project_path("Inputs", "trajectory_odom-synthetic.csv"))
-        self.declare_parameter("rssi_csv", default_project_path("Outputs", "slam_dataset_run1-synthetic.csv"))
+        self.declare_parameter("odom_csv", "Inputs/trajectory_odom-synthetic.csv")
+        self.declare_parameter("rssi_csv", "Outputs/slam_dataset_run1-synthetic.csv")
+        self.declare_parameter("positions_csv", "Inputs/positions-synthetic.csv")
+        self.declare_parameter("position_start_row", 1)
         self.declare_parameter("frame_id", "map")
         self.declare_parameter("robot_frame_id", "base_link")
         self.declare_parameter("odom_frame_id", "odom")
@@ -113,6 +190,12 @@ class RssiSlamReplayNode(Node):
 
         self.declare_parameter("ap_marker_z", 1.5)
         self.declare_parameter("ap_marker_scale", 1.5)
+        self.declare_parameter("true_ap_marker_z", 1.5)
+        self.declare_parameter("true_ap_marker_scale", 1.0)
+        self.declare_parameter("show_true_ap_positions", True)
+        self.declare_parameter("show_ap_error_vectors", True)
+        self.declare_parameter("mapping_error_good_m", 3.0)
+        self.declare_parameter("mapping_error_bad_m", 15.0)
         self.declare_parameter("heatmap_z", 0.05)
 
         self.declare_parameter("path_loss_exponent", 4.4)
@@ -128,8 +211,17 @@ class RssiSlamReplayNode(Node):
         self.frame_id = self.get_parameter("frame_id").value
         self.robot_frame_id = self.get_parameter("robot_frame_id").value
         self.odom_frame_id = self.get_parameter("odom_frame_id").value
-        self.odom_rows = read_odom_csv(self.get_parameter("odom_csv").value)
-        self.rssi_rows = read_rssi_csv(self.get_parameter("rssi_csv").value)
+        self.odom_csv = resolve_existing_path(self.get_parameter("odom_csv").value)
+        self.rssi_csv = resolve_existing_path(self.get_parameter("rssi_csv").value)
+        self.positions_csv = resolve_existing_path(self.get_parameter("positions_csv").value)
+        self.odom_rows = read_odom_csv(self.odom_csv)
+        self.rssi_rows = read_rssi_csv(self.rssi_csv)
+        self.rssi_macs = ordered_macs_from_rssi_rows(self.rssi_rows)
+        self.true_ap_positions = read_positions_csv(
+            self.positions_csv,
+            self.rssi_macs,
+            self.get_parameter("position_start_row").value,
+        )
         self.odom_index = 0
         self.rssi_index = 0
         self.path_msg = RosPath()
@@ -164,8 +256,12 @@ class RssiSlamReplayNode(Node):
         self.get_logger().info(
             "RSSI SLAM replay ready: "
             f"odom_rows={len(self.odom_rows)}, rssi_rows={len(self.rssi_rows)}, "
-            f"odom_csv={self.get_parameter('odom_csv').value}, rssi_csv={self.get_parameter('rssi_csv').value}"
+            f"odom_csv={self.odom_csv}, rssi_csv={self.rssi_csv}"
         )
+        if self.true_ap_positions:
+            self.get_logger().info(f"Loaded true AP positions for {len(self.true_ap_positions)} MACs from {self.positions_csv}")
+        else:
+            self.get_logger().warn("No true AP positions loaded; AP mapping error overlay disabled.")
 
     def on_timer(self):
         rows_per_tick = max(1, int(self.get_parameter("odom_rows_per_tick").value))
@@ -270,6 +366,9 @@ class RssiSlamReplayNode(Node):
         marker_z = float(self.get_parameter("ap_marker_z").value)
         marker_scale = float(self.get_parameter("ap_marker_scale").value)
 
+        if self.get_parameter("show_true_ap_positions").value:
+            self.add_true_ap_markers(markers, stamp)
+
         for landmark in snapshot["landmarks"]:
             marker_id = int(landmark["id"])
             r, g, b, a = color_for_mac(landmark["mac"], 0.95)
@@ -313,7 +412,154 @@ class RssiSlamReplayNode(Node):
             label.text = landmark["mac"]
             markers.markers.append(label)
 
+            error = self.mapping_error_for_landmark(landmark)
+            if error is not None:
+                self.add_mapping_error_markers(markers, landmark, error, stamp)
+
         return markers
+
+    def add_true_ap_markers(self, markers, stamp):
+        true_z = float(self.get_parameter("true_ap_marker_z").value)
+        true_scale = float(self.get_parameter("true_ap_marker_scale").value)
+        for idx, mac in enumerate(self.rssi_macs, start=1):
+            if mac not in self.true_ap_positions:
+                continue
+            true_x, true_y, _ = self.true_ap_positions[mac]
+            marker = Marker()
+            marker.header.frame_id = self.frame_id
+            marker.header.stamp = stamp
+            marker.ns = "ap_true_positions"
+            marker.id = idx
+            marker.type = Marker.CUBE
+            marker.action = Marker.ADD
+            marker.pose.position.x = true_x
+            marker.pose.position.y = true_y
+            marker.pose.position.z = true_z
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = true_scale
+            marker.scale.y = true_scale
+            marker.scale.z = true_scale
+            marker.color.r = 1.0
+            marker.color.g = 1.0
+            marker.color.b = 1.0
+            marker.color.a = 0.9
+            markers.markers.append(marker)
+
+            label = Marker()
+            label.header.frame_id = self.frame_id
+            label.header.stamp = stamp
+            label.ns = "ap_true_labels"
+            label.id = idx
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = true_x
+            label.pose.position.y = true_y
+            label.pose.position.z = true_z + true_scale
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.65
+            label.color.r = 1.0
+            label.color.g = 1.0
+            label.color.b = 1.0
+            label.color.a = 1.0
+            label.text = f"true {mac}"
+            markers.markers.append(label)
+
+    def mapping_error_for_landmark(self, landmark):
+        mac = landmark["mac"]
+        if mac not in self.true_ap_positions:
+            return None
+        true_x, true_y, true_z = self.true_ap_positions[mac]
+        dx = landmark["x"] - true_x
+        dy = landmark["y"] - true_y
+        error_m = math.hypot(dx, dy)
+        return {
+            "mac": mac,
+            "true_x": true_x,
+            "true_y": true_y,
+            "true_z": true_z,
+            "dx": dx,
+            "dy": dy,
+            "error_m": error_m,
+        }
+
+    def mapping_errors(self, snapshot):
+        errors = []
+        for landmark in snapshot["landmarks"]:
+            error = self.mapping_error_for_landmark(landmark)
+            if error is None:
+                continue
+            errors.append(
+                {
+                    "mac": error["mac"],
+                    "estimated": [landmark["x"], landmark["y"]],
+                    "true": [error["true_x"], error["true_y"]],
+                    "dx_m": error["dx"],
+                    "dy_m": error["dy"],
+                    "error_m": error["error_m"],
+                }
+            )
+        return errors
+
+    @staticmethod
+    def mapping_error_summary(errors):
+        if not errors:
+            return None
+        values = [item["error_m"] for item in errors]
+        rmse = math.sqrt(sum(value * value for value in values) / len(values))
+        return {
+            "count": len(values),
+            "mean_m": sum(values) / len(values),
+            "rmse_m": rmse,
+            "max_m": max(values),
+        }
+
+    def add_mapping_error_markers(self, markers, landmark, error, stamp):
+        marker_id = int(landmark["id"])
+        true_z = float(self.get_parameter("true_ap_marker_z").value)
+        est_z = float(self.get_parameter("ap_marker_z").value)
+        good_m = float(self.get_parameter("mapping_error_good_m").value)
+        bad_m = float(self.get_parameter("mapping_error_bad_m").value)
+        r, g, b, a = error_color(error["error_m"], good_m, bad_m, 0.95)
+
+        if self.get_parameter("show_ap_error_vectors").value:
+            arrow = Marker()
+            arrow.header.frame_id = self.frame_id
+            arrow.header.stamp = stamp
+            arrow.ns = "ap_mapping_error_vectors"
+            arrow.id = marker_id
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.points = [
+                make_point(error["true_x"], error["true_y"], true_z),
+                make_point(landmark["x"], landmark["y"], est_z),
+            ]
+            arrow.scale.x = 0.25
+            arrow.scale.y = 0.75
+            arrow.scale.z = 0.75
+            arrow.color.r = r
+            arrow.color.g = g
+            arrow.color.b = b
+            arrow.color.a = a
+            markers.markers.append(arrow)
+
+            label = Marker()
+            label.header.frame_id = self.frame_id
+            label.header.stamp = stamp
+            label.ns = "ap_mapping_error_labels"
+            label.id = marker_id
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = 0.5 * (error["true_x"] + landmark["x"])
+            label.pose.position.y = 0.5 * (error["true_y"] + landmark["y"])
+            label.pose.position.z = max(true_z, est_z) + 1.2
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.75
+            label.color.r = r
+            label.color.g = g
+            label.color.b = b
+            label.color.a = 1.0
+            label.text = f"{error['mac']} err={error['error_m']:.2f} m"
+            markers.markers.append(label)
 
     def publish_heatmaps_by_mac(self, snapshot, stamp):
         for mac, points in snapshot["heatmap_points_by_mac"].items():
@@ -349,12 +595,15 @@ class RssiSlamReplayNode(Node):
         return point_cloud2.create_cloud(header, fields, points)
 
     def make_status(self, snapshot):
+        errors = self.mapping_errors(snapshot)
         return {
             "csv_time_s": snapshot["time_s"],
             "initialized": snapshot["initialized"],
             "update_index": snapshot["update_index"],
             "pose_key": snapshot["pose_key"],
             "landmarks": snapshot["landmarks"],
+            "ap_mapping_errors": errors,
+            "ap_mapping_error_summary": self.mapping_error_summary(errors),
             "heatmap_topics_by_mac": self.heatmap_topics_by_mac,
             "pending_rssi": snapshot["pending_rssi"],
         }
