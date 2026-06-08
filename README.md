@@ -1,0 +1,3 @@
+Diseño de un simulación WSN en NS-3 bajo el estándar IEEE 802.15.4 para generar medidas de RSSI. El sistema modela nodos IOT y un escenario realista 
+usando desvanecimiento de Nakagami-m y CSMA/CA. La simulación de Red se apoya junto a la componente robótica con ROS2 y Gazebo, "co-simulando" 
+la cinemática de un robot en entornos 3D. El objetivo es ser capaz de implementar un sistema de SLAM, gracias al uso de ambos simuladores.
